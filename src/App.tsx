@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Calendar, MapPin, Clock, Wallet, Plus, Car, Train, ArrowLeft, 
   Edit2, Trash2, Heart, PlaneTakeoff, Download, Bus, Plane, 
@@ -99,47 +99,120 @@ export default function App() {
 
   const [subItemForm, setSubItemForm] = useState({ parentId: null, id: null, name: '', myCost: '', partnerCost: '' });
 
-  // --- Real-time Sync Effect (Polling Google Sheets) ---
-  useEffect(() => {
-    if (!sheetUrl) return;
-    
-    const loadDataFromSheet = async () => {
-      try {
-        const response = await fetch(sheetUrl);
-        const data = await response.json();
-        if (Array.isArray(data)) {
-          setTrips(prevTrips => {
-            // Only update if data is different (prevents input overwrite)
-            if (JSON.stringify(prevTrips) !== JSON.stringify(data)) {
-              localStorage.setItem('coupleTrips', JSON.stringify(data));
-              return data;
-            }
-            return prevTrips;
-          });
-        }
-      } catch (error) {
-        // Silent fail on polling errors
-      }
-    };
+  // --- Refs for Sync Logic ---
+  const tripsRef = useRef(trips);
+  const lastSaveTimeRef = useRef(0);
+  const hasSyncedRef = useRef(false);
 
-    loadDataFromSheet(); // Load immediately on mount
-    const interval = setInterval(loadDataFromSheet, 5000); // Poll every 5 seconds
-    
-    return () => clearInterval(interval);
-  }, [sheetUrl]);
-
-  // Tab Auto-Selection
   useEffect(() => {
-    const trip = trips.find(t => t.id === selectedTripId);
-    if (trip && trip.startDate && !activeTabDate) {
-      setActiveTabDate(trip.startDate);
+    tripsRef.current = trips;
+  }, [trips]);
+
+  // --- Calculation Helpers ---
+  const formatCurrency = (amount) => new Intl.NumberFormat('th-TH', { style: 'currency', currency: 'THB' }).format(amount || 0);
+  const formatDate = (dateString) => {
+    if (!dateString) return '';
+    return new Date(dateString).toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: 'numeric' });
+  };
+  
+  const generateDateRange = (startDate, endDate) => {
+    if (!startDate || !endDate) return [];
+    const start = new Date(startDate);
+    const end = new Date(endDate);
+    const dates = [];
+    let current = new Date(start);
+    while (current <= end) {
+      const year = current.getFullYear();
+      const month = String(current.getMonth() + 1).padStart(2, '0');
+      const day = String(current.getDate()).padStart(2, '0');
+      dates.push(`${year}-${month}-${day}`);
+      current.setDate(current.getDate() + 1);
     }
-  }, [selectedTripId, trips]);
+    return dates;
+  };
+
+  const calculateTotalSpent = (trip) => {
+    if (!trip) return { me: 0, partner: 0, total: 0 };
+    let me = 0; let partner = 0;
+
+    if (trip.transport) {
+      me += Number(trip.transport.outbound?.myCost) || 0;
+      partner += Number(trip.transport.outbound?.partnerCost) || 0;
+      me += Number(trip.transport.return?.myCost) || 0;
+      partner += Number(trip.transport.return?.partnerCost) || 0;
+    }
+    
+    const itinerary = trip.itinerary || [];
+    itinerary.forEach((item) => {
+      let itemMe = Number(item.myCost) || 0;
+      let itemPartner = Number(item.partnerCost) || 0;
+      if (item.subItems) {
+        item.subItems.forEach(sub => {
+          itemMe += Number(sub.myCost) || 0;
+          itemPartner += Number(sub.partnerCost) || 0;
+        });
+      }
+      me += itemMe; partner += itemPartner;
+    });
+    return { me, partner, total: me + partner };
+  };
+
+  const generateExportData = (tripsData) => {
+    const rows = [];
+    rows.push(["ชื่อทริป","วันไป","วันกลับ","ใช้รวม","ฉันจ่ายรวม","แฟนจ่ายรวม","สถานที่/กิจกรรม","การเดินทาง","รายละเอียดการเดินทาง","ฉันจ่าย(หลัก)","แฟนจ่าย(หลัก)","กิจกรรมย่อย","ฉันจ่าย(ย่อย)","แฟนจ่าย(ย่อย)"]);
+
+    tripsData.forEach(trip => {
+      const spent = calculateTotalSpent(trip);
+      if (!trip.itinerary || trip.itinerary.length === 0) {
+        rows.push([trip.name, trip.startDate, trip.endDate, spent.total, spent.me, spent.partner, "", "", "", "", "", "", "", ""]);
+      } else {
+        trip.itinerary.forEach((item, index) => {
+          let transportInfo = '';
+          if (item.transportMode === 'public') {
+             const origin = item.publicOriginStation ? `[${item.publicOriginSystem}] ${item.publicOriginStation}` : '-';
+             const dest = item.publicDestStation ? `[${item.publicDestSystem}] ${item.publicDestStation}` : '-';
+             transportInfo = `จาก ${origin} ไป ${dest}`;
+          }
+          if (item.transportMode === 'grab') transportInfo = `จุดรับ: ${item.grabPickup || '-'}`;
+
+          const prefix = index === 0 ? [trip.name, trip.startDate, trip.endDate, spent.total, spent.me, spent.partner] : ["", "", "", "", "", ""];
+          
+          if (!item.subItems || item.subItems.length === 0) {
+            rows.push([...prefix, item.name, item.transportMode === 'public' ? 'รถสาธารณะ' : 'Grab/Taxi', transportInfo, item.myCost || 0, item.partnerCost || 0, "", "", ""]);
+          } else {
+            item.subItems.forEach((sub, sIdx) => {
+               if (sIdx === 0) {
+                 rows.push([...prefix, item.name, item.transportMode === 'public' ? 'รถสาธารณะ' : 'Grab/Taxi', transportInfo, item.myCost || 0, item.partnerCost || 0, sub.name, sub.myCost || 0, sub.partnerCost || 0]);
+               } else {
+                 rows.push(["", "", "", "", "", "", `${item.name} (ต่อ)`, "", "", "", "", sub.name, sub.myCost || 0, sub.partnerCost || 0]);
+               }
+            });
+          }
+        });
+      }
+    });
+    return rows;
+  };
+
+  const getTransportIcon = (type) => {
+    if (type === 'bus') return <Bus size={18}/>;
+    if (type === 'train') return <Train size={18}/>;
+    if (type === 'plane') return <Plane size={18}/>;
+    return null;
+  };
+
+  const getTransportName = (type) => {
+    if (type === 'bus') return 'รถทัวร์/รถตู้';
+    if (type === 'train') return 'รถไฟ';
+    if (type === 'plane') return 'เครื่องบิน';
+    return '';
+  };
 
   // --- Core Save Logic (Saves locally and to Google Sheets) ---
   const saveTrips = (newTrips) => {
     setTrips(newTrips);
     localStorage.setItem('coupleTrips', JSON.stringify(newTrips));
+    lastSaveTimeRef.current = Date.now(); // ล็อคระบบเพื่อไม่ให้ดึงข้อมูลเก่ามาลบทับตอนกำลังเซฟ
 
     if (sheetUrl) {
       setSyncStatus('syncing');
@@ -161,6 +234,57 @@ export default function App() {
       });
     }
   };
+
+  // --- Real-time Sync Effect (Polling Google Sheets) ---
+  useEffect(() => {
+    if (!sheetUrl) return;
+    
+    const loadDataFromSheet = async () => {
+      // ถ้าระบบเพิ่งกดเซฟไปไม่ถึง 6 วินาที ให้ข้ามการดึงข้อมูลไปก่อน เพื่อป้องกันการลบทับ
+      if (Date.now() - lastSaveTimeRef.current < 6000) return;
+
+      try {
+        // ทะลวงแคชเบราว์เซอร์ เพื่อให้ได้ข้อมูลอัปเดตใหม่ล่าสุดเสมอ
+        const urlWithCacheBuster = sheetUrl + (sheetUrl.includes('?') ? '&' : '?') + 't=' + new Date().getTime();
+        const response = await fetch(urlWithCacheBuster);
+        const data = await response.json();
+        
+        if (Array.isArray(data)) {
+          const currentTrips = tripsRef.current;
+
+          // ระบบกู้ชีพ: ถ้า Google Sheet ว่างเปล่า (เพราะเพิ่งสร้าง) แต่ในเครื่องเรามีทริปอยู่แล้ว ให้ดันข้อมูลไปบันทึกแทนการลบทิ้ง
+          if (data.length === 0 && currentTrips.length > 0 && !hasSyncedRef.current) {
+            saveTrips(currentTrips);
+            hasSyncedRef.current = true;
+            return;
+          }
+
+          hasSyncedRef.current = true;
+
+          // อัปเดตเมื่อมีข้อมูลใหม่เข้ามาเท่านั้น
+          if (JSON.stringify(currentTrips) !== JSON.stringify(data)) {
+            setTrips(data);
+            localStorage.setItem('coupleTrips', JSON.stringify(data));
+          }
+        }
+      } catch (error) {
+        // เงียบไว้เมื่อต่อเน็ตไม่ได้
+      }
+    };
+
+    loadDataFromSheet(); // Load ทันทีที่เปิดเว็บ
+    const interval = setInterval(loadDataFromSheet, 5000); // ดึงข้อมูลทุก 5 วินาที
+    
+    return () => clearInterval(interval);
+  }, [sheetUrl]);
+
+  // Tab Auto-Selection
+  useEffect(() => {
+    const trip = trips.find(t => t.id === selectedTripId);
+    if (trip && trip.startDate && !activeTabDate) {
+      setActiveTabDate(trip.startDate);
+    }
+  }, [selectedTripId, trips]);
 
   // --- Handlers ---
   const handleSaveTrip = (e) => {
@@ -265,106 +389,6 @@ export default function App() {
         [direction]: { ...prev.transport[direction], [field]: value }
       }
     }));
-  };
-
-  // --- Calculation Helpers ---
-  const formatCurrency = (amount) => new Intl.NumberFormat('th-TH', { style: 'currency', currency: 'THB' }).format(amount || 0);
-  const formatDate = (dateString) => {
-    if (!dateString) return '';
-    return new Date(dateString).toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: 'numeric' });
-  };
-  
-  const generateDateRange = (startDate, endDate) => {
-    if (!startDate || !endDate) return [];
-    const start = new Date(startDate);
-    const end = new Date(endDate);
-    const dates = [];
-    let current = new Date(start);
-    while (current <= end) {
-      const year = current.getFullYear();
-      const month = String(current.getMonth() + 1).padStart(2, '0');
-      const day = String(current.getDate()).padStart(2, '0');
-      dates.push(`${year}-${month}-${day}`);
-      current.setDate(current.getDate() + 1);
-    }
-    return dates;
-  };
-
-  const calculateTotalSpent = (trip) => {
-    if (!trip) return { me: 0, partner: 0, total: 0 };
-    let me = 0; let partner = 0;
-
-    if (trip.transport) {
-      me += Number(trip.transport.outbound?.myCost) || 0;
-      partner += Number(trip.transport.outbound?.partnerCost) || 0;
-      me += Number(trip.transport.return?.myCost) || 0;
-      partner += Number(trip.transport.return?.partnerCost) || 0;
-    }
-    
-    const itinerary = trip.itinerary || [];
-    itinerary.forEach((item) => {
-      let itemMe = Number(item.myCost) || 0;
-      let itemPartner = Number(item.partnerCost) || 0;
-      if (item.subItems) {
-        item.subItems.forEach(sub => {
-          itemMe += Number(sub.myCost) || 0;
-          itemPartner += Number(sub.partnerCost) || 0;
-        });
-      }
-      me += itemMe; partner += itemPartner;
-    });
-    return { me, partner, total: me + partner };
-  };
-
-  const generateExportData = (tripsData) => {
-    const rows = [];
-    rows.push(["ชื่อทริป","วันไป","วันกลับ","ใช้รวม","ฉันจ่ายรวม","แฟนจ่ายรวม","สถานที่/กิจกรรม","การเดินทาง","รายละเอียดการเดินทาง","ฉันจ่าย(หลัก)","แฟนจ่าย(หลัก)","กิจกรรมย่อย","ฉันจ่าย(ย่อย)","แฟนจ่าย(ย่อย)"]);
-
-    tripsData.forEach(trip => {
-      const spent = calculateTotalSpent(trip);
-      if (!trip.itinerary || trip.itinerary.length === 0) {
-        rows.push([trip.name, trip.startDate, trip.endDate, spent.total, spent.me, spent.partner, "", "", "", "", "", "", "", ""]);
-      } else {
-        trip.itinerary.forEach((item, index) => {
-          let transportInfo = '';
-          if (item.transportMode === 'public') {
-             const origin = item.publicOriginStation ? `[${item.publicOriginSystem}] ${item.publicOriginStation}` : '-';
-             const dest = item.publicDestStation ? `[${item.publicDestSystem}] ${item.publicDestStation}` : '-';
-             transportInfo = `จาก ${origin} ไป ${dest}`;
-          }
-          if (item.transportMode === 'grab') transportInfo = `จุดรับ: ${item.grabPickup || '-'}`;
-
-          const prefix = index === 0 ? [trip.name, trip.startDate, trip.endDate, spent.total, spent.me, spent.partner] : ["", "", "", "", "", ""];
-          
-          if (!item.subItems || item.subItems.length === 0) {
-            rows.push([...prefix, item.name, item.transportMode === 'public' ? 'รถสาธารณะ' : 'Grab/Taxi', transportInfo, item.myCost || 0, item.partnerCost || 0, "", "", ""]);
-          } else {
-            item.subItems.forEach((sub, sIdx) => {
-               if (sIdx === 0) {
-                 rows.push([...prefix, item.name, item.transportMode === 'public' ? 'รถสาธารณะ' : 'Grab/Taxi', transportInfo, item.myCost || 0, item.partnerCost || 0, sub.name, sub.myCost || 0, sub.partnerCost || 0]);
-               } else {
-                 rows.push(["", "", "", "", "", "", `${item.name} (ต่อ)`, "", "", "", "", sub.name, sub.myCost || 0, sub.partnerCost || 0]);
-               }
-            });
-          }
-        });
-      }
-    });
-    return rows;
-  };
-
-  const getTransportIcon = (type) => {
-    if (type === 'bus') return <Bus size={18}/>;
-    if (type === 'train') return <Train size={18}/>;
-    if (type === 'plane') return <Plane size={18}/>;
-    return null;
-  };
-
-  const getTransportName = (type) => {
-    if (type === 'bus') return 'รถทัวร์/รถตู้';
-    if (type === 'train') return 'รถไฟ';
-    if (type === 'plane') return 'เครื่องบิน';
-    return '';
   };
 
   // --- Render Sections ---

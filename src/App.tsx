@@ -2,10 +2,23 @@ import React, { useState, useEffect } from 'react';
 import { 
   Calendar, MapPin, Clock, Wallet, Plus, Car, Train, ArrowLeft, 
   Edit2, Trash2, Heart, PlaneTakeoff, Download, Bus, Plane, 
-  Utensils, Navigation, ArrowRight, User, Users, Settings, RefreshCw, CheckCircle2
+  Utensils, Navigation, ArrowRight, User, Users, CheckCircle2,
+  Link as LinkIcon, Copy, X
 } from 'lucide-react';
 
-// --- Static Data for Stations (Full List sorted by Codes) ---
+// --- Firebase Realtime Database Imports ---
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot } from 'firebase/firestore';
+
+// --- Firebase Configuration ---
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'couple-trip-planner';
+
+// --- Static Data for Stations ---
 const STATION_DATA = {
   "BTS (สายสีเขียว/สีทอง)": [
     "CEN สยาม", "N1 ราชเทวี", "N2 พญาไท", "N3 อนุสาวรีย์ชัยสมรภูมิ", "N4 สนามเป้า", "N5 อารีย์", "N7 สะพานควาย", "N8 หมอชิต", 
@@ -56,27 +69,27 @@ const STATION_DATA = {
 };
 
 export default function App() {
-  const [trips, setTrips] = useState(() => {
-    const savedTrips = localStorage.getItem('coupleTrips');
-    return savedTrips ? JSON.parse(savedTrips) : [];
-  });
+  // --- Auth & Sync States ---
+  const [user, setUser] = useState(null);
+  const [coupleCode, setCoupleCode] = useState(''); // รหัสสำหรับดึงข้อมูล
+  const [partnerCodeInput, setPartnerCodeInput] = useState('');
   
+  // --- App States ---
+  const [trips, setTrips] = useState([]);
   const [currentView, setCurrentView] = useState('dashboard');
   const [selectedTripId, setSelectedTripId] = useState(null);
   
-  // Modal States
+  // --- Modal States ---
   const [isTripModalOpen, setIsTripModalOpen] = useState(false);
   const [isItemModalOpen, setIsItemModalOpen] = useState(false);
   const [isSubItemModalOpen, setIsSubItemModalOpen] = useState(false);
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isShareModalOpen, setIsShareModalOpen] = useState(false);
+  
+  // --- Tab States ---
   const [tripFormTab, setTripFormTab] = useState('outbound');
   const [activeTabDate, setActiveTabDate] = useState('');
-  
-  // Sheet Sync States
-  const [sheetUrl, setSheetUrl] = useState(() => localStorage.getItem('coupleSheetUrl') || '');
-  const [syncStatus, setSyncStatus] = useState(''); 
 
-  // Form States
+  // --- Form States ---
   const [tripForm, setTripForm] = useState({ 
     id: null, name: '', startDate: '', endDate: '', departureTime: '', returnTime: '',
     transport: {
@@ -95,7 +108,209 @@ export default function App() {
 
   const [subItemForm, setSubItemForm] = useState({ parentId: null, id: null, name: '', myCost: '', partnerCost: '' });
 
-  // --- Helpers ---
+  // --- 1. Initialize Firebase Auth ---
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (err) {
+        console.error("Auth error:", err);
+      }
+    };
+    initAuth();
+
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      if (currentUser) {
+        // หากไม่มีรหัสเชื่อมต่อตั้งไว้ ให้ใช้รหัสส่วนตัว (UID) ของตัวเองเป็นค่าเริ่มต้น
+        if (!coupleCode) {
+          setCoupleCode(currentUser.uid);
+        }
+      }
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // --- 2. Realtime Data Sync ---
+  useEffect(() => {
+    if (!user || !coupleCode) return;
+
+    // ชี้เป้าหมายไปที่ฐานข้อมูลหลัก (Public Data -> coupleTrips)
+    const tripsRef = collection(db, 'artifacts', appId, 'public', 'data', 'coupleTrips');
+    
+    // onSnapshot คือความลับของการ "พิมพ์ปุ๊บ เด้งปั๊บ"
+    const unsubscribe = onSnapshot(tripsRef, (snapshot) => {
+      const allTrips = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id }));
+      // ดึงเฉพาะทริปที่มี รหัสคู่รัก ตรงกับที่เราตั้งไว้
+      const myTrips = allTrips.filter(t => t.coupleCode === coupleCode);
+      // เรียงทริปตามวันที่
+      myTrips.sort((a, b) => new Date(a.startDate) - new Date(b.startDate));
+      
+      setTrips(myTrips);
+    }, (error) => {
+      console.error("Sync Error:", error);
+    });
+
+    return () => unsubscribe();
+  }, [user, coupleCode]);
+
+  useEffect(() => {
+    const trip = trips.find(t => t.id === selectedTripId);
+    if (trip && trip.startDate && !activeTabDate) {
+      setActiveTabDate(trip.startDate);
+    }
+  }, [selectedTripId, trips]);
+
+  // --- Data Base Operations ---
+  const saveTripToCloud = async (tripData) => {
+    if (!user || !coupleCode) return;
+    try {
+      const tripId = tripData.id || Date.now().toString();
+      const payload = { ...tripData, id: tripId, coupleCode: coupleCode };
+      await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'coupleTrips', tripId), payload);
+    } catch (err) {
+      console.error("Save Error:", err);
+    }
+  };
+
+  const deleteTripFromCloud = async (tripId) => {
+    if (!user) return;
+    try {
+      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'coupleTrips', tripId));
+    } catch (err) {
+      console.error("Delete Error:", err);
+    }
+  };
+
+  // --- Handlers ---
+  const handleSaveTrip = (e) => {
+    e.preventDefault();
+    const newTrip = { ...tripForm, itinerary: tripForm.itinerary || [] };
+    saveTripToCloud(newTrip);
+    setIsTripModalOpen(false);
+  };
+
+  const handleDeleteTrip = (id, e) => {
+    e.stopPropagation();
+    if(window.confirm('คุณแน่ใจหรือไม่ว่าต้องการลบทริปนี้? ระบบจะลบออกจากเครื่องของแฟนด้วยนะ')) {
+      deleteTripFromCloud(id);
+      if (selectedTripId === id) setCurrentView('dashboard');
+    }
+  };
+
+  const handleSaveItem = (e) => {
+    e.preventDefault();
+    const trip = trips.find(t => t.id === selectedTripId);
+    if (!trip) return;
+
+    let newItinerary = [...(trip.itinerary || [])];
+    if (itemForm.id) {
+      newItinerary = newItinerary.map(item => item.id === itemForm.id ? { ...item, ...itemForm } : item);
+    } else {
+      newItinerary.push({ ...itemForm, id: Date.now().toString(), subItems: [] });
+    }
+    
+    saveTripToCloud({ ...trip, itinerary: newItinerary });
+    setIsItemModalOpen(false);
+  };
+
+  const handleDeleteItem = (itemId) => {
+    if(window.confirm('ลบรายการนี้ใช่ไหม?')) {
+      const trip = trips.find(t => t.id === selectedTripId);
+      if (!trip) return;
+      saveTripToCloud({ ...trip, itinerary: trip.itinerary.filter(i => i.id !== itemId) });
+    }
+  };
+
+  const handleSaveSubItem = (e) => {
+    e.preventDefault();
+    const trip = trips.find(t => t.id === selectedTripId);
+    if (!trip) return;
+
+    const newItinerary = trip.itinerary.map(item => {
+      if (item.id === subItemForm.parentId) {
+         const newSubItems = [...(item.subItems || [])];
+         if (subItemForm.id) {
+           return { ...item, subItems: newSubItems.map(si => si.id === subItemForm.id ? subItemForm : si) };
+         } else {
+           newSubItems.push({ ...subItemForm, id: Date.now().toString() });
+           return { ...item, subItems: newSubItems };
+         }
+      }
+      return item;
+    });
+
+    saveTripToCloud({ ...trip, itinerary: newItinerary });
+    setIsSubItemModalOpen(false);
+  };
+
+  const handleDeleteSubItem = (itemId, subItemId) => {
+    if(window.confirm('ลบกิจกรรมย่อยนี้ใช่ไหม?')) {
+      const trip = trips.find(t => t.id === selectedTripId);
+      if (!trip) return;
+      
+      const newItinerary = trip.itinerary.map(item => {
+        if (item.id === itemId) {
+          return { ...item, subItems: item.subItems.filter(si => si.id !== subItemId) };
+        }
+        return item;
+      });
+
+      saveTripToCloud({ ...trip, itinerary: newItinerary });
+    }
+  };
+
+  const handleLinkPartner = (e) => {
+    e.preventDefault();
+    if (partnerCodeInput.trim() !== '') {
+      setCoupleCode(partnerCodeInput.trim());
+      setIsShareModalOpen(false);
+      setCurrentView('dashboard');
+    }
+  };
+
+  const copyToClipboard = (text) => {
+    try {
+      document.execCommand('copy'); // Fallback for iFrame
+      navigator.clipboard.writeText(text);
+      // Small visual feedback could go here
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  // --- Form Resets ---
+  const resetTripForm = () => {
+    setTripFormTab('outbound');
+    setTripForm({ 
+      id: null, name: '', startDate: '', endDate: '', departureTime: '', returnTime: '',
+      transport: {
+        outbound: { type: 'none', busBoarding: '', busPlatform: '', trainNumber: '', trainBogie: '', trainPlatform: '', flightAirline: '', flightNumber: '', flightGate: '', myCost: '', partnerCost: '' },
+        return: { type: 'none', busBoarding: '', busPlatform: '', trainNumber: '', trainBogie: '', trainPlatform: '', flightAirline: '', flightNumber: '', flightGate: '', myCost: '', partnerCost: '' }
+      }
+    });
+  };
+
+  const resetItemForm = (date) => setItemForm({ 
+    id: null, name: '', transportMode: 'public', myCost: '', partnerCost: '', 
+    publicOriginSystem: '', publicOriginStation: '', publicDestSystem: '', publicDestStation: '', grabPickup: '', date: date || '' 
+  });
+
+  const updateTransportDetails = (direction, field, value) => {
+    setTripForm(prev => ({
+      ...prev,
+      transport: {
+        ...prev.transport,
+        [direction]: { ...prev.transport[direction], [field]: value }
+      }
+    }));
+  };
+
+  // --- Calculation Helpers ---
   const formatCurrency = (amount) => new Intl.NumberFormat('th-TH', { style: 'currency', currency: 'THB' }).format(amount || 0);
   const formatDate = (dateString) => {
     if (!dateString) return '';
@@ -133,12 +348,12 @@ export default function App() {
     
     const itinerary = trip.itinerary || [];
     itinerary.forEach((item) => {
-      let itemMe = Number(item.myCost) || (item.cost && !item.myCost && !item.partnerCost ? Number(item.cost) : 0);
+      let itemMe = Number(item.myCost) || 0;
       let itemPartner = Number(item.partnerCost) || 0;
       
       if (item.subItems) {
         item.subItems.forEach(sub => {
-          itemMe += Number(sub.myCost) || (sub.cost && !sub.myCost && !sub.partnerCost ? Number(sub.cost) : 0);
+          itemMe += Number(sub.myCost) || 0;
           itemPartner += Number(sub.partnerCost) || 0;
         });
       }
@@ -149,14 +364,15 @@ export default function App() {
     return { me, partner, total: me + partner };
   };
 
-  const generateExportData = (tripsData) => {
-    const rows = [];
-    rows.push(["ชื่อทริป","วันไป","วันกลับ","ใช้รวม","ฉันจ่ายรวม","แฟนจ่ายรวม","สถานที่/กิจกรรม","การเดินทาง","รายละเอียดการเดินทาง","ฉันจ่าย(หลัก)","แฟนจ่าย(หลัก)","กิจกรรมย่อย","ฉันจ่าย(ย่อย)","แฟนจ่าย(ย่อย)"]);
+  // --- Export to CSV ---
+  const exportToCSV = () => {
+    let csvContent = "data:text/csv;charset=utf-8,\uFEFF"; 
+    csvContent += "ชื่อทริป,วันไป,วันกลับ,ใช้รวม,ฉันจ่ายรวม,แฟนจ่ายรวม,สถานที่/กิจกรรม,การเดินทาง,รายละเอียดการเดินทาง,ฉันจ่าย(หลัก),แฟนจ่าย(หลัก),กิจกรรมย่อย,ฉันจ่าย(ย่อย),แฟนจ่าย(ย่อย)\n";
 
-    tripsData.forEach(trip => {
+    trips.forEach(trip => {
       const spent = calculateTotalSpent(trip);
       if (!trip.itinerary || trip.itinerary.length === 0) {
-        rows.push([trip.name, trip.startDate, trip.endDate, spent.total, spent.me, spent.partner, "", "", "", "", "", "", "", ""]);
+        csvContent += `${trip.name},${trip.startDate},${trip.endDate},${spent.total},${spent.me},${spent.partner},,,,,, \n`;
       } else {
         trip.itinerary.forEach((item, index) => {
           let transportInfo = '';
@@ -167,78 +383,30 @@ export default function App() {
           }
           if (item.transportMode === 'grab') transportInfo = `จุดรับ: ${item.grabPickup || '-'}`;
 
-          const prefix = index === 0 ? [trip.name, trip.startDate, trip.endDate, spent.total, spent.me, spent.partner] : ["", "", "", "", "", ""];
+          const prefix = index === 0 ? `${trip.name},${trip.startDate},${trip.endDate},${spent.total},${spent.me},${spent.partner}` : `,,,,,`;
           
           if (!item.subItems || item.subItems.length === 0) {
-            rows.push([...prefix, item.name, item.transportMode === 'public' ? 'รถสาธารณะ' : 'Grab/Taxi', transportInfo, item.myCost || 0, item.partnerCost || 0, "", "", ""]);
+            csvContent += `${prefix},${item.name},${item.transportMode === 'public' ? 'รถสาธารณะ' : 'Grab/Taxi'},${transportInfo},${item.myCost || 0},${item.partnerCost || 0},,\n`;
           } else {
             item.subItems.forEach((sub, sIdx) => {
                if (sIdx === 0) {
-                 rows.push([...prefix, item.name, item.transportMode === 'public' ? 'รถสาธารณะ' : 'Grab/Taxi', transportInfo, item.myCost || 0, item.partnerCost || 0, sub.name, sub.myCost || 0, sub.partnerCost || 0]);
+                 csvContent += `${prefix},${item.name},${item.transportMode === 'public' ? 'รถสาธารณะ' : 'Grab/Taxi'},${transportInfo},${item.myCost || 0},${item.partnerCost || 0},${sub.name},${sub.myCost || 0},${sub.partnerCost || 0}\n`;
                } else {
-                 rows.push(["", "", "", "", "", "", `${item.name} (ต่อ)`, "", "", "", "", sub.name, sub.myCost || 0, sub.partnerCost || 0]);
+                 csvContent += `,,,,,,,${item.name} (ต่อ),,,,${sub.name},${sub.myCost || 0},${sub.partnerCost || 0}\n`;
                }
             });
           }
         });
       }
     });
-    return rows;
+
+    const link = document.createElement("a");
+    link.setAttribute("href", encodeURI(csvContent));
+    link.setAttribute("download", "trip_planner_export.csv");
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
-
-  // --- UseEffects ---
-  useEffect(() => {
-    const trip = trips.find(t => t.id === selectedTripId);
-    if (trip && trip.startDate) setActiveTabDate(trip.startDate);
-  }, [selectedTripId, trips]);
-
-  // Load Data from Google Sheet
-  useEffect(() => {
-    if (!sheetUrl) return;
-
-    const loadFromSheet = async () => {
-      setSyncStatus('syncing');
-      try {
-        const response = await fetch(sheetUrl);
-        const rawData = await response.json();
-        
-        if (rawData && rawData.length > 1) {
-          console.log("Data loaded from sheet - Reverse Mapping is not active by default to prevent overriding manual entry.");
-        }
-        setSyncStatus('success');
-        setTimeout(() => setSyncStatus(''), 2000);
-      } catch (err) {
-        console.error("Load failed", err);
-        setSyncStatus('error');
-      }
-    };
-
-    loadFromSheet();
-  }, [sheetUrl]);
-
-  // Auto-Save to LocalStorage and Sheet
-  useEffect(() => {
-    localStorage.setItem('coupleTrips', JSON.stringify(trips));
-    localStorage.setItem('coupleSheetUrl', sheetUrl);
-    
-    if (sheetUrl && trips.length > 0) {
-      const timer = setTimeout(() => {
-        setSyncStatus('syncing');
-        const exportData = generateExportData(trips);
-        
-        fetch(sheetUrl, {
-          method: 'POST',
-          mode: 'no-cors',
-          body: JSON.stringify(exportData)
-        }).then(() => {
-          setSyncStatus('success');
-          setTimeout(() => setSyncStatus(''), 2000);
-        }).catch(() => setSyncStatus('error'));
-      }, 2000);
-      return () => clearTimeout(timer);
-    }
-  }, [trips, sheetUrl]);
-
 
   const getTransportIcon = (type) => {
     if (type === 'bus') return <Bus size={18}/>;
@@ -254,114 +422,7 @@ export default function App() {
     return '';
   };
 
-  const exportToCSV = () => {
-    const rows = generateExportData(trips);
-    let csvContent = "data:text/csv;charset=utf-8,\uFEFF" + rows.map(e => e.join(",")).join("\n");
-
-    const link = document.createElement("a");
-    link.setAttribute("href", encodeURI(csvContent));
-    link.setAttribute("download", "trip_planner_export.csv");
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
-
-  // --- Handlers ---
-  const handleSaveTrip = (e) => {
-    e.preventDefault();
-    if (tripForm.id) {
-      setTrips(trips.map(t => t.id === tripForm.id ? { ...t, ...tripForm } : t));
-    } else {
-      setTrips([...trips, { ...tripForm, id: Date.now().toString(), itinerary: [] }]);
-    }
-    setIsTripModalOpen(false);
-  };
-
-  const handleDeleteTrip = (id, e) => {
-    e.stopPropagation();
-    if(window.confirm('คุณแน่ใจหรือไม่ว่าต้องการลบทริปนี้?')) {
-      setTrips(trips.filter(t => t.id !== id));
-      if (selectedTripId === id) setCurrentView('dashboard');
-    }
-  };
-
-  const handleSaveItem = (e) => {
-    e.preventDefault();
-    setTrips(trips.map(trip => {
-      if (trip.id === selectedTripId) {
-        let newItinerary = [...(trip.itinerary || [])];
-        if (itemForm.id) {
-          newItinerary = newItinerary.map(item => item.id === itemForm.id ? { ...item, ...itemForm } : item);
-        } else {
-          newItinerary.push({ ...itemForm, id: Date.now().toString(), subItems: [] });
-        }
-        return { ...trip, itinerary: newItinerary };
-      }
-      return trip;
-    }));
-    setIsItemModalOpen(false);
-  };
-
-  const handleDeleteItem = (itemId) => {
-    if(window.confirm('ลบรายการนี้ใช่ไหม?')) setTrips(trips.map(t => t.id === selectedTripId ? { ...t, itinerary: t.itinerary.filter(i => i.id !== itemId) } : t));
-  };
-
-  const handleSaveSubItem = (e) => {
-    e.preventDefault();
-    setTrips(trips.map(t => {
-      if (t.id === selectedTripId) {
-        return {
-          ...t, itinerary: t.itinerary.map(item => {
-            if (item.id === subItemForm.parentId) {
-               const newSubItems = [...(item.subItems || [])];
-               if (subItemForm.id) return { ...item, subItems: newSubItems.map(si => si.id === subItemForm.id ? subItemForm : si) };
-               newSubItems.push({ ...subItemForm, id: Date.now().toString() });
-               return { ...item, subItems: newSubItems };
-            }
-            return item;
-          })
-        };
-      }
-      return t;
-    }));
-    setIsSubItemModalOpen(false);
-  };
-
-  const handleDeleteSubItem = (itemId, subItemId) => {
-    if(window.confirm('ลบกิจกรรมย่อยนี้ใช่ไหม?')) {
-      setTrips(trips.map(t => t.id === selectedTripId ? {
-        ...t, itinerary: t.itinerary.map(item => item.id === itemId ? { ...item, subItems: item.subItems.filter(si => si.id !== subItemId) } : item)
-      } : t));
-    }
-  };
-
-  const resetTripForm = () => {
-    setTripFormTab('outbound');
-    setTripForm({ 
-      id: null, name: '', startDate: '', endDate: '', departureTime: '', returnTime: '',
-      transport: {
-        outbound: { type: 'none', busBoarding: '', busPlatform: '', trainNumber: '', trainBogie: '', trainPlatform: '', flightAirline: '', flightNumber: '', flightGate: '', myCost: '', partnerCost: '' },
-        return: { type: 'none', busBoarding: '', busPlatform: '', trainNumber: '', trainBogie: '', trainPlatform: '', flightAirline: '', flightNumber: '', flightGate: '', myCost: '', partnerCost: '' }
-      }
-    });
-  };
-
-  const resetItemForm = (date) => setItemForm({ 
-    id: null, name: '', transportMode: 'public', myCost: '', partnerCost: '', 
-    publicOriginSystem: '', publicOriginStation: '', publicDestSystem: '', publicDestStation: '', grabPickup: '', date: date || '' 
-  });
-
-  const updateTransportDetails = (direction, field, value) => {
-    setTripForm(prev => ({
-      ...prev,
-      transport: {
-        ...prev.transport,
-        [direction]: { ...prev.transport[direction], [field]: value }
-      }
-    }));
-  };
-
-  // --- Render Transport Form Section (Outbound/Return) ---
+  // --- Render Sections ---
   const renderTransportFormSection = (direction) => {
     const data = tripForm.transport[direction];
     return (
@@ -448,7 +509,6 @@ export default function App() {
     );
   };
 
-  // --- Render Trip Display Transport Details ---
   const renderTripDisplayTransport = (trip) => {
     const outbound = trip.transport?.outbound || { type: trip.transportType || 'none', ...trip.transportDetails };
     const returnTrip = trip.transport?.return || { type: 'none' };
@@ -506,22 +566,24 @@ export default function App() {
     );
   };
 
-  // --- Views ---
   const renderDashboard = () => (
     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-      <div className="flex justify-between items-center bg-white p-6 rounded-2xl shadow-sm border border-rose-100">
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-white p-6 rounded-2xl shadow-sm border border-rose-100 gap-4">
         <div>
           <h2 className="text-2xl font-bold text-gray-800 flex items-center gap-2">แพลนเที่ยวของเรา <Heart className="text-rose-500" fill="currentColor" size={24} /></h2>
-          <p className="text-gray-500 mt-1">วางแผนความทรงจำดีๆ ไปด้วยกัน</p>
+          <p className="text-gray-500 mt-1">วางแผนความทรงจำดีๆ ไปด้วยกันแบบ Real-time</p>
         </div>
-        <div className="flex gap-2">
-          {syncStatus === 'syncing' && <div className="p-2 text-teal-500 flex items-center gap-1 text-sm font-medium animate-pulse"><RefreshCw size={18} className="animate-spin"/> กำลังซิงค์...</div>}
-          {syncStatus === 'success' && <div className="p-2 text-green-500 flex items-center gap-1 text-sm font-medium"><CheckCircle2 size={18}/> อัปเดตแล้ว</div>}
-          <button onClick={() => setIsSettingsOpen(true)} className={`p-2 rounded-full transition-colors ${sheetUrl ? 'text-teal-600 bg-teal-50 hover:bg-teal-100' : 'text-gray-400 hover:bg-gray-100'}`} title="ตั้งค่าเชื่อมต่อ Google Sheet">
-            <Settings size={24} />
+        <div className="flex gap-2 w-full sm:w-auto">
+          {/* Share Button (New) */}
+          <button 
+            onClick={() => setIsShareModalOpen(true)} 
+            className={`flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-2 rounded-xl transition-colors font-medium border ${coupleCode && user && coupleCode !== user.uid ? 'bg-indigo-50 text-indigo-600 border-indigo-200 hover:bg-indigo-100' : 'bg-rose-50 text-rose-600 border-rose-200 hover:bg-rose-100'}`}
+          >
+            <LinkIcon size={18} /> {coupleCode && user && coupleCode !== user.uid ? 'เชื่อมต่อแล้ว' : 'แชร์ให้แฟน'}
           </button>
-          <button onClick={exportToCSV} className="p-2 text-gray-500 hover:text-teal-600 hover:bg-teal-50 rounded-full transition-colors" title="ส่งออกข้อมูล (CSV)">
-            <Download size={24} />
+
+          <button onClick={exportToCSV} className="p-2 text-gray-500 hover:text-teal-600 hover:bg-teal-50 rounded-xl border border-gray-200 transition-colors" title="ส่งออกเป็น Excel/CSV">
+            <Download size={20} />
           </button>
         </div>
       </div>
@@ -530,7 +592,7 @@ export default function App() {
         {trips.length === 0 ? (
           <div className="text-center py-12 bg-white rounded-2xl border border-dashed border-gray-300">
             <PlaneTakeoff className="mx-auto h-12 w-12 text-gray-400 mb-3" />
-            <p className="text-gray-500 text-lg">ยังไม่มีทริปเลย มาสร้างทริปแรกกันเถอะ!</p>
+            <p className="text-gray-500 text-lg">ยังไม่มีทริปเลย มากดสร้างทริปกันเถอะ!</p>
           </div>
         ) : (
           trips.map(trip => {
@@ -613,20 +675,19 @@ export default function App() {
           <div className="grid grid-cols-3 gap-4 bg-gray-50 p-4 rounded-xl border border-gray-100">
             <div>
               <p className="text-xs text-gray-500 mb-1 flex items-center gap-1"><Wallet size={12}/> รวมใช้จ่ายไป</p>
-              <p className="font-bold text-gray-800 text-lg">{formatCurrency(spent.total)}</p>
+              <p className="font-bold text-gray-800 text-lg sm:text-xl">{formatCurrency(spent.total)}</p>
             </div>
             <div>
               <p className="text-xs text-blue-500 mb-1 flex items-center gap-1"><User size={12}/> ฉันจ่ายไป</p>
-              <p className="font-bold text-blue-700 text-lg">{formatCurrency(spent.me)}</p>
+              <p className="font-bold text-blue-700 text-lg sm:text-xl">{formatCurrency(spent.me)}</p>
             </div>
             <div>
               <p className="text-xs text-rose-400 mb-1 flex items-center gap-1"><Heart size={12}/> แฟนจ่ายไป</p>
-              <p className="font-bold text-rose-600 text-lg">{formatCurrency(spent.partner)}</p>
+              <p className="font-bold text-rose-600 text-lg sm:text-xl">{formatCurrency(spent.partner)}</p>
             </div>
           </div>
         </div>
 
-        {/* Date Selection Tabs */}
         {tripDates.length > 0 && (
           <div className="flex overflow-x-auto gap-3 pb-2 mb-2 scrollbar-hide">
             {tripDates.map((date, index) => (
@@ -765,36 +826,58 @@ export default function App() {
       </header>
 
       <main className="max-w-3xl mx-auto px-4 sm:px-6 py-8">
-        {currentView === 'dashboard' ? renderDashboard() : renderTripDetails()}
+        {!user ? (
+          <div className="flex flex-col items-center justify-center py-20 animate-pulse">
+            <PlaneTakeoff size={48} className="text-rose-300 mb-4" />
+            <p className="text-gray-500 font-medium">กำลังเตรียมพร้อมขึ้นบิน...</p>
+          </div>
+        ) : (
+          currentView === 'dashboard' ? renderDashboard() : renderTripDetails()
+        )}
       </main>
 
-      {/* --- Settings Modal --- */}
-      {isSettingsOpen && (
+      {/* --- Share Modal (NEW) --- */}
+      {isShareModalOpen && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200">
-            <div className="bg-teal-50 px-6 py-4 border-b border-teal-100 flex justify-between items-center">
-              <h3 className="text-lg font-bold text-teal-800 flex items-center gap-2"><Settings size={18}/> ตั้งค่าเชื่อมต่อ Google Sheet</h3>
-              <button onClick={() => setIsSettingsOpen(false)} className="text-teal-400 hover:text-teal-600">&times;</button>
+            <div className="bg-rose-50 px-6 py-4 border-b border-rose-100 flex justify-between items-center">
+              <h3 className="text-lg font-bold text-rose-800 flex items-center gap-2"><LinkIcon size={18}/> เชื่อมต่อกับแฟน</h3>
+              <button onClick={() => setIsShareModalOpen(false)} className="text-rose-400 hover:text-rose-600"><X size={20}/></button>
             </div>
-            <div className="p-6 space-y-4">
-              <p className="text-sm text-gray-600">
-                เมื่อใส่ URL ของ Google Apps Script แล้ว ข้อมูลจะถูกซิงค์และจัดเรียงลงใน Google Sheet โดยอัตโนมัติเมื่อมีการเปลี่ยนแปลง
-              </p>
-              <div>
-                <label className="block text-sm font-bold text-gray-700 mb-2">Web App URL</label>
+            <div className="p-6 space-y-6">
+              
+              {/* Step 1: My Code */}
+              <div className="space-y-2">
+                <label className="block text-sm font-bold text-gray-700">1. รหัสของคุณ (ส่งให้แฟนกรอก)</label>
+                <div className="flex items-center gap-2">
+                  <input readOnly value={user?.uid || ''} className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl text-sm font-mono text-gray-500 outline-none" />
+                  <button onClick={() => copyToClipboard(user?.uid || '')} className="p-3 bg-rose-100 text-rose-600 rounded-xl hover:bg-rose-200 transition-colors" title="คัดลอกรหัส">
+                    <Copy size={20} />
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-4">
+                <div className="h-px bg-gray-200 flex-1"></div>
+                <span className="text-xs text-gray-400 font-bold">หรือ</span>
+                <div className="h-px bg-gray-200 flex-1"></div>
+              </div>
+
+              {/* Step 2: Partner Code */}
+              <form onSubmit={handleLinkPartner} className="space-y-2">
+                <label className="block text-sm font-bold text-gray-700">2. นำรหัสของแฟนมากรอกที่นี่</label>
                 <input 
                   type="text" 
-                  value={sheetUrl} 
-                  onChange={e => setSheetUrl(e.target.value)} 
-                  className="w-full p-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-teal-500 outline-none text-sm font-mono" 
-                  placeholder="https://script.google.com/macros/s/.../exec" 
+                  value={partnerCodeInput} 
+                  onChange={e => setPartnerCodeInput(e.target.value)} 
+                  className="w-full p-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-rose-500 outline-none text-sm font-mono" 
+                  placeholder="วางรหัสของแฟน..." 
                 />
-              </div>
-              <div className="pt-2">
-                <button onClick={() => setIsSettingsOpen(false)} className="w-full py-3 bg-teal-500 text-white font-bold rounded-xl hover:bg-teal-600 transition-colors shadow-md shadow-teal-200">
-                  บันทึกและปิด
+                <button type="submit" disabled={!partnerCodeInput.trim()} className="w-full mt-3 py-3 bg-rose-500 text-white font-bold rounded-xl hover:bg-rose-600 disabled:bg-rose-300 disabled:cursor-not-allowed transition-colors shadow-md shadow-rose-200">
+                  เชื่อมต่อข้อมูล
                 </button>
-              </div>
+              </form>
+
             </div>
           </div>
         </div>

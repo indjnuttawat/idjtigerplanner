@@ -56,6 +56,9 @@ const STATION_DATA = {
   ]
 };
 
+// ล็อค URL ของ Google Apps Script ไว้ที่นี่
+const LOCKED_SHEET_URL = "https://script.google.com/macros/s/AKfycbycHD2NZOErlryoK7NCSYqQ5kTO7yftLZDDnNW_cuHD30kwgzNBnZIBEu1YV2dIXnYpyw/exec";
+
 export default function App() {
   // --- States ---
   const [trips, setTrips] = useState(() => {
@@ -77,8 +80,8 @@ export default function App() {
   const [currentView, setCurrentView] = useState('dashboard');
   const [selectedTripId, setSelectedTripId] = useState(null);
   
-  // Sheet Sync States
-  const [sheetUrl, setSheetUrl] = useState(() => localStorage.getItem('coupleSheetUrl') || '');
+  // Sheet Sync States (ใช้ URL ที่ล็อคไว้เสมอ)
+  const sheetUrl = LOCKED_SHEET_URL;
   const [syncStatus, setSyncStatus] = useState(''); // '', 'syncing', 'success', 'error'
   
   // Modal States
@@ -570,7 +573,7 @@ export default function App() {
             onClick={() => setIsSettingsOpen(true)} 
             className={`flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-2 rounded-xl transition-colors font-medium border ${sheetUrl ? 'bg-indigo-50 text-indigo-600 border-indigo-200 hover:bg-indigo-100' : 'bg-rose-50 text-rose-600 border-rose-200 hover:bg-rose-100'}`}
           >
-            <LinkIcon size={18} /> {sheetUrl ? 'แชร์ให้แฟน' : 'ตั้งค่าเชื่อมต่อ'}
+            <LinkIcon size={18} /> {sheetUrl ? 'การเชื่อมต่อ' : 'ตั้งค่าเชื่อมต่อ'}
           </button>
         </div>
       </div>
@@ -821,27 +824,29 @@ export default function App() {
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200">
             <div className="bg-teal-50 px-6 py-4 border-b border-teal-100 flex justify-between items-center">
-              <h3 className="text-lg font-bold text-teal-800 flex items-center gap-2"><Settings size={18}/> ตั้งค่าแชร์ให้แฟน</h3>
+              <h3 className="text-lg font-bold text-teal-800 flex items-center gap-2"><Settings size={18}/> สถานะการเชื่อมต่อ</h3>
               <button onClick={() => setIsSettingsOpen(false)} className="text-teal-400 hover:text-teal-600"><X size={20}/></button>
             </div>
             <div className="p-6 space-y-4">
-              <div className="bg-rose-50 p-3 rounded-xl border border-rose-100 mb-4 text-sm text-rose-800">
-                <strong className="block mb-1">อยากลิงก์ข้อมูลกันไหม?</strong>
-                แค่คัดลอก Web App URL (ของ Google Sheet) ด้านล่างนี้ ไปส่งให้แฟนกรอกไว้ที่เครื่องแฟน ข้อมูลก็จะซิงค์ตรงกันเป๊ะเลยครับ!
+              <div className="bg-green-50 p-3 rounded-xl border border-green-100 mb-4 text-sm text-green-800 flex items-start gap-2">
+                <CheckCircle2 size={20} className="shrink-0 text-green-500 mt-0.5" />
+                <div>
+                  <strong className="block mb-1">เชื่อมต่อกับฐานข้อมูลอัตโนมัติแล้ว!</strong>
+                  ข้อมูลทั้งหมดจะถูกอัปเดตและซิงค์แบบเรียลไทม์ระหว่างเครื่องของคุณกับแฟนโดยอัตโนมัติ ไม่ต้องตั้งค่าอะไรเพิ่มเติมครับ
+                </div>
               </div>
               <div>
-                <label className="block text-sm font-bold text-gray-700 mb-2">Web App URL (จาก Google Sheet)</label>
+                <label className="block text-sm font-bold text-gray-700 mb-2">Web App URL (ล็อคแล้ว)</label>
                 <input 
                   type="text" 
+                  readOnly
                   value={sheetUrl} 
-                  onChange={e => setSheetUrl(e.target.value)} 
-                  className="w-full p-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-teal-500 outline-none text-sm font-mono" 
-                  placeholder="https://script.google.com/macros/s/.../exec" 
+                  className="w-full p-3 border border-gray-300 bg-gray-100 rounded-xl outline-none text-sm font-mono text-gray-500 cursor-not-allowed" 
                 />
               </div>
               <div className="pt-2">
                 <button onClick={() => setIsSettingsOpen(false)} className="w-full py-3 bg-teal-500 text-white font-bold rounded-xl hover:bg-teal-600 transition-colors shadow-md shadow-teal-200">
-                  บันทึกการตั้งค่า
+                  ปิดหน้าต่างนี้
                 </button>
               </div>
             </div>

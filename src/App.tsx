@@ -59,8 +59,19 @@ const STATION_DATA = {
 export default function App() {
   // --- States ---
   const [trips, setTrips] = useState(() => {
-    const savedTrips = localStorage.getItem('coupleTrips');
-    return savedTrips ? JSON.parse(savedTrips) : [];
+    try {
+      const savedTrips = localStorage.getItem('coupleTrips');
+      if (savedTrips) {
+        const parsed = JSON.parse(savedTrips);
+        if (Array.isArray(parsed)) {
+          // ระบบเกราะป้องกัน: กรองเฉพาะทริปที่ข้อมูลสมบูรณ์ ป้องกันการ์ดพัง
+          return parsed.filter(t => t && typeof t === 'object' && t.id && t.name);
+        }
+      }
+    } catch (e) {
+      console.error(e);
+    }
+    return [];
   });
   
   const [currentView, setCurrentView] = useState('dashboard');
@@ -210,16 +221,19 @@ export default function App() {
 
   // --- Core Save Logic (Saves locally and to Google Sheets) ---
   const saveTrips = (newTrips) => {
-    setTrips(newTrips);
-    localStorage.setItem('coupleTrips', JSON.stringify(newTrips));
+    // กรองข้อมูลก่อนเซฟ เพื่อไม่ให้ของพังๆ ถูกส่งไป Google Sheet
+    const cleanTrips = newTrips.filter(t => t && typeof t === 'object' && t.id && t.name);
+    
+    setTrips(cleanTrips);
+    localStorage.setItem('coupleTrips', JSON.stringify(cleanTrips));
     lastSaveTimeRef.current = Date.now(); // ล็อคระบบเพื่อไม่ให้ดึงข้อมูลเก่ามาลบทับตอนกำลังเซฟ
 
     if (sheetUrl) {
       setSyncStatus('syncing');
-      const rows = generateExportData(newTrips);
+      const rows = generateExportData(cleanTrips);
       if (rows.length === 0) rows.push(["ไม่มีข้อมูล"]);
       
-      const payload = { rawJson: JSON.stringify(newTrips), rows: rows };
+      const payload = { rawJson: JSON.stringify(cleanTrips), rows: rows };
 
       fetch(sheetUrl, {
         method: 'POST',
@@ -247,13 +261,19 @@ export default function App() {
         // ทะลวงแคชเบราว์เซอร์ เพื่อให้ได้ข้อมูลอัปเดตใหม่ล่าสุดเสมอ
         const urlWithCacheBuster = sheetUrl + (sheetUrl.includes('?') ? '&' : '?') + 't=' + new Date().getTime();
         const response = await fetch(urlWithCacheBuster);
-        const data = await response.json();
+        const rawText = await response.text();
+        
+        if (!rawText || rawText.trim() === '') return;
+
+        const data = JSON.parse(rawText);
         
         if (Array.isArray(data)) {
+          // กรองเอาเฉพาะข้อมูลทริปที่ถูกต้อง ป้องกัน Card ว่างเปล่า
+          const validData = data.filter(t => t && typeof t === 'object' && t.id && t.name);
           const currentTrips = tripsRef.current;
 
-          // ระบบกู้ชีพ: ถ้า Google Sheet ว่างเปล่า (เพราะเพิ่งสร้าง) แต่ในเครื่องเรามีทริปอยู่แล้ว ให้ดันข้อมูลไปบันทึกแทนการลบทิ้ง
-          if (data.length === 0 && currentTrips.length > 0 && !hasSyncedRef.current) {
+          // ระบบกู้ชีพ: ถ้า Google Sheet ว่างเปล่า แต่ในเครื่องเรามีทริปอยู่แล้ว ให้ดันข้อมูลไปบันทึกแทน
+          if (validData.length === 0 && currentTrips.length > 0 && !hasSyncedRef.current) {
             saveTrips(currentTrips);
             hasSyncedRef.current = true;
             return;
@@ -262,9 +282,9 @@ export default function App() {
           hasSyncedRef.current = true;
 
           // อัปเดตเมื่อมีข้อมูลใหม่เข้ามาเท่านั้น
-          if (JSON.stringify(currentTrips) !== JSON.stringify(data)) {
-            setTrips(data);
-            localStorage.setItem('coupleTrips', JSON.stringify(data));
+          if (JSON.stringify(currentTrips) !== JSON.stringify(validData)) {
+            setTrips(validData);
+            localStorage.setItem('coupleTrips', JSON.stringify(validData));
           }
         }
       } catch (error) {

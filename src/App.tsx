@@ -3,20 +3,8 @@ import {
   Calendar, MapPin, Clock, Wallet, Plus, Car, Train, ArrowLeft, 
   Edit2, Trash2, Heart, PlaneTakeoff, Download, Bus, Plane, 
   Utensils, Navigation, ArrowRight, User, Users, CheckCircle2,
-  Link as LinkIcon, Copy, X
+  Link as LinkIcon, Settings, RefreshCw, X
 } from 'lucide-react';
-
-// --- Firebase Realtime Database Imports ---
-import { initializeApp } from 'firebase/app';
-import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot } from 'firebase/firestore';
-
-// --- Firebase Configuration ---
-const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'couple-trip-planner';
 
 // --- Static Data for Stations ---
 const STATION_DATA = {
@@ -69,27 +57,30 @@ const STATION_DATA = {
 };
 
 export default function App() {
-  // --- Auth & Sync States ---
-  const [user, setUser] = useState(null);
-  const [coupleCode, setCoupleCode] = useState(''); // รหัสสำหรับดึงข้อมูล
-  const [partnerCodeInput, setPartnerCodeInput] = useState('');
+  // --- States ---
+  const [trips, setTrips] = useState(() => {
+    const savedTrips = localStorage.getItem('coupleTrips');
+    return savedTrips ? JSON.parse(savedTrips) : [];
+  });
   
-  // --- App States ---
-  const [trips, setTrips] = useState([]);
   const [currentView, setCurrentView] = useState('dashboard');
   const [selectedTripId, setSelectedTripId] = useState(null);
   
-  // --- Modal States ---
+  // Sheet Sync States
+  const [sheetUrl, setSheetUrl] = useState(() => localStorage.getItem('coupleSheetUrl') || '');
+  const [syncStatus, setSyncStatus] = useState(''); // '', 'syncing', 'success', 'error'
+  
+  // Modal States
   const [isTripModalOpen, setIsTripModalOpen] = useState(false);
   const [isItemModalOpen, setIsItemModalOpen] = useState(false);
   const [isSubItemModalOpen, setIsSubItemModalOpen] = useState(false);
-  const [isShareModalOpen, setIsShareModalOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   
-  // --- Tab States ---
+  // Tab States
   const [tripFormTab, setTripFormTab] = useState('outbound');
   const [activeTabDate, setActiveTabDate] = useState('');
 
-  // --- Form States ---
+  // Form States
   const [tripForm, setTripForm] = useState({ 
     id: null, name: '', startDate: '', endDate: '', departureTime: '', returnTime: '',
     transport: {
@@ -108,56 +99,36 @@ export default function App() {
 
   const [subItemForm, setSubItemForm] = useState({ parentId: null, id: null, name: '', myCost: '', partnerCost: '' });
 
-  // --- 1. Initialize Firebase Auth ---
+  // --- Real-time Sync Effect (Polling Google Sheets) ---
   useEffect(() => {
-    const initAuth = async () => {
+    if (!sheetUrl) return;
+    
+    const loadDataFromSheet = async () => {
       try {
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-          await signInWithCustomToken(auth, __initial_auth_token);
-        } else {
-          await signInAnonymously(auth);
+        const response = await fetch(sheetUrl);
+        const data = await response.json();
+        if (Array.isArray(data)) {
+          setTrips(prevTrips => {
+            // Only update if data is different (prevents input overwrite)
+            if (JSON.stringify(prevTrips) !== JSON.stringify(data)) {
+              localStorage.setItem('coupleTrips', JSON.stringify(data));
+              return data;
+            }
+            return prevTrips;
+          });
         }
-      } catch (err) {
-        console.error("Auth error:", err);
+      } catch (error) {
+        // Silent fail on polling errors
       }
     };
-    initAuth();
 
-    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
-      setUser(currentUser);
-      if (currentUser) {
-        // หากไม่มีรหัสเชื่อมต่อตั้งไว้ ให้ใช้รหัสส่วนตัว (UID) ของตัวเองเป็นค่าเริ่มต้น
-        if (!coupleCode) {
-          setCoupleCode(currentUser.uid);
-        }
-      }
-    });
-    return () => unsubscribe();
-  }, []);
-
-  // --- 2. Realtime Data Sync ---
-  useEffect(() => {
-    if (!user || !coupleCode) return;
-
-    // ชี้เป้าหมายไปที่ฐานข้อมูลหลัก (Public Data -> coupleTrips)
-    const tripsRef = collection(db, 'artifacts', appId, 'public', 'data', 'coupleTrips');
+    loadDataFromSheet(); // Load immediately on mount
+    const interval = setInterval(loadDataFromSheet, 5000); // Poll every 5 seconds
     
-    // onSnapshot คือความลับของการ "พิมพ์ปุ๊บ เด้งปั๊บ"
-    const unsubscribe = onSnapshot(tripsRef, (snapshot) => {
-      const allTrips = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id }));
-      // ดึงเฉพาะทริปที่มี รหัสคู่รัก ตรงกับที่เราตั้งไว้
-      const myTrips = allTrips.filter(t => t.coupleCode === coupleCode);
-      // เรียงทริปตามวันที่
-      myTrips.sort((a, b) => new Date(a.startDate) - new Date(b.startDate));
-      
-      setTrips(myTrips);
-    }, (error) => {
-      console.error("Sync Error:", error);
-    });
+    return () => clearInterval(interval);
+  }, [sheetUrl]);
 
-    return () => unsubscribe();
-  }, [user, coupleCode]);
-
+  // Tab Auto-Selection
   useEffect(() => {
     const trip = trips.find(t => t.id === selectedTripId);
     if (trip && trip.startDate && !activeTabDate) {
@@ -165,121 +136,107 @@ export default function App() {
     }
   }, [selectedTripId, trips]);
 
-  // --- Data Base Operations ---
-  const saveTripToCloud = async (tripData) => {
-    if (!user || !coupleCode) return;
-    try {
-      const tripId = tripData.id || Date.now().toString();
-      const payload = { ...tripData, id: tripId, coupleCode: coupleCode };
-      await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'coupleTrips', tripId), payload);
-    } catch (err) {
-      console.error("Save Error:", err);
-    }
-  };
+  // --- Core Save Logic (Saves locally and to Google Sheets) ---
+  const saveTrips = (newTrips) => {
+    setTrips(newTrips);
+    localStorage.setItem('coupleTrips', JSON.stringify(newTrips));
 
-  const deleteTripFromCloud = async (tripId) => {
-    if (!user) return;
-    try {
-      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'coupleTrips', tripId));
-    } catch (err) {
-      console.error("Delete Error:", err);
+    if (sheetUrl) {
+      setSyncStatus('syncing');
+      const rows = generateExportData(newTrips);
+      if (rows.length === 0) rows.push(["ไม่มีข้อมูล"]);
+      
+      const payload = { rawJson: JSON.stringify(newTrips), rows: rows };
+
+      fetch(sheetUrl, {
+        method: 'POST',
+        mode: 'no-cors',
+        headers: { 'Content-Type': 'text/plain' },
+        body: JSON.stringify(payload)
+      }).then(() => {
+        setSyncStatus('success');
+        setTimeout(() => setSyncStatus(''), 2000);
+      }).catch(() => {
+        setSyncStatus('error');
+      });
     }
   };
 
   // --- Handlers ---
   const handleSaveTrip = (e) => {
     e.preventDefault();
-    const newTrip = { ...tripForm, itinerary: tripForm.itinerary || [] };
-    saveTripToCloud(newTrip);
+    let newTrips;
+    if (tripForm.id) {
+      newTrips = trips.map(t => t.id === tripForm.id ? { ...t, ...tripForm } : t);
+    } else {
+      newTrips = [...trips, { ...tripForm, id: Date.now().toString(), itinerary: [] }];
+    }
+    saveTrips(newTrips);
     setIsTripModalOpen(false);
   };
 
   const handleDeleteTrip = (id, e) => {
     e.stopPropagation();
-    if(window.confirm('คุณแน่ใจหรือไม่ว่าต้องการลบทริปนี้? ระบบจะลบออกจากเครื่องของแฟนด้วยนะ')) {
-      deleteTripFromCloud(id);
+    if(window.confirm('คุณแน่ใจหรือไม่ว่าต้องการลบทริปนี้?')) {
+      const newTrips = trips.filter(t => t.id !== id);
+      saveTrips(newTrips);
       if (selectedTripId === id) setCurrentView('dashboard');
     }
   };
 
   const handleSaveItem = (e) => {
     e.preventDefault();
-    const trip = trips.find(t => t.id === selectedTripId);
-    if (!trip) return;
-
-    let newItinerary = [...(trip.itinerary || [])];
-    if (itemForm.id) {
-      newItinerary = newItinerary.map(item => item.id === itemForm.id ? { ...item, ...itemForm } : item);
-    } else {
-      newItinerary.push({ ...itemForm, id: Date.now().toString(), subItems: [] });
-    }
-    
-    saveTripToCloud({ ...trip, itinerary: newItinerary });
+    const newTrips = trips.map(trip => {
+      if (trip.id === selectedTripId) {
+        let newItinerary = [...(trip.itinerary || [])];
+        if (itemForm.id) {
+          newItinerary = newItinerary.map(item => item.id === itemForm.id ? { ...item, ...itemForm } : item);
+        } else {
+          newItinerary.push({ ...itemForm, id: Date.now().toString(), subItems: [] });
+        }
+        return { ...trip, itinerary: newItinerary };
+      }
+      return trip;
+    });
+    saveTrips(newTrips);
     setIsItemModalOpen(false);
   };
 
   const handleDeleteItem = (itemId) => {
     if(window.confirm('ลบรายการนี้ใช่ไหม?')) {
-      const trip = trips.find(t => t.id === selectedTripId);
-      if (!trip) return;
-      saveTripToCloud({ ...trip, itinerary: trip.itinerary.filter(i => i.id !== itemId) });
+      const newTrips = trips.map(t => t.id === selectedTripId ? { ...t, itinerary: t.itinerary.filter(i => i.id !== itemId) } : t);
+      saveTrips(newTrips);
     }
   };
 
   const handleSaveSubItem = (e) => {
     e.preventDefault();
-    const trip = trips.find(t => t.id === selectedTripId);
-    if (!trip) return;
-
-    const newItinerary = trip.itinerary.map(item => {
-      if (item.id === subItemForm.parentId) {
-         const newSubItems = [...(item.subItems || [])];
-         if (subItemForm.id) {
-           return { ...item, subItems: newSubItems.map(si => si.id === subItemForm.id ? subItemForm : si) };
-         } else {
-           newSubItems.push({ ...subItemForm, id: Date.now().toString() });
-           return { ...item, subItems: newSubItems };
-         }
+    const newTrips = trips.map(t => {
+      if (t.id === selectedTripId) {
+        return {
+          ...t, itinerary: t.itinerary.map(item => {
+            if (item.id === subItemForm.parentId) {
+               const newSubItems = [...(item.subItems || [])];
+               if (subItemForm.id) return { ...item, subItems: newSubItems.map(si => si.id === subItemForm.id ? subItemForm : si) };
+               newSubItems.push({ ...subItemForm, id: Date.now().toString() });
+               return { ...item, subItems: newSubItems };
+            }
+            return item;
+          })
+        };
       }
-      return item;
+      return t;
     });
-
-    saveTripToCloud({ ...trip, itinerary: newItinerary });
+    saveTrips(newTrips);
     setIsSubItemModalOpen(false);
   };
 
   const handleDeleteSubItem = (itemId, subItemId) => {
     if(window.confirm('ลบกิจกรรมย่อยนี้ใช่ไหม?')) {
-      const trip = trips.find(t => t.id === selectedTripId);
-      if (!trip) return;
-      
-      const newItinerary = trip.itinerary.map(item => {
-        if (item.id === itemId) {
-          return { ...item, subItems: item.subItems.filter(si => si.id !== subItemId) };
-        }
-        return item;
-      });
-
-      saveTripToCloud({ ...trip, itinerary: newItinerary });
-    }
-  };
-
-  const handleLinkPartner = (e) => {
-    e.preventDefault();
-    if (partnerCodeInput.trim() !== '') {
-      setCoupleCode(partnerCodeInput.trim());
-      setIsShareModalOpen(false);
-      setCurrentView('dashboard');
-    }
-  };
-
-  const copyToClipboard = (text) => {
-    try {
-      document.execCommand('copy'); // Fallback for iFrame
-      navigator.clipboard.writeText(text);
-      // Small visual feedback could go here
-    } catch (err) {
-      console.error(err);
+      const newTrips = trips.map(t => t.id === selectedTripId ? {
+        ...t, itinerary: t.itinerary.map(item => item.id === itemId ? { ...item, subItems: item.subItems.filter(si => si.id !== subItemId) } : item)
+      } : t);
+      saveTrips(newTrips);
     }
   };
 
@@ -335,9 +292,7 @@ export default function App() {
 
   const calculateTotalSpent = (trip) => {
     if (!trip) return { me: 0, partner: 0, total: 0 };
-    
-    let me = 0;
-    let partner = 0;
+    let me = 0; let partner = 0;
 
     if (trip.transport) {
       me += Number(trip.transport.outbound?.myCost) || 0;
@@ -350,29 +305,25 @@ export default function App() {
     itinerary.forEach((item) => {
       let itemMe = Number(item.myCost) || 0;
       let itemPartner = Number(item.partnerCost) || 0;
-      
       if (item.subItems) {
         item.subItems.forEach(sub => {
           itemMe += Number(sub.myCost) || 0;
           itemPartner += Number(sub.partnerCost) || 0;
         });
       }
-      me += itemMe;
-      partner += itemPartner;
+      me += itemMe; partner += itemPartner;
     });
-
     return { me, partner, total: me + partner };
   };
 
-  // --- Export to CSV ---
-  const exportToCSV = () => {
-    let csvContent = "data:text/csv;charset=utf-8,\uFEFF"; 
-    csvContent += "ชื่อทริป,วันไป,วันกลับ,ใช้รวม,ฉันจ่ายรวม,แฟนจ่ายรวม,สถานที่/กิจกรรม,การเดินทาง,รายละเอียดการเดินทาง,ฉันจ่าย(หลัก),แฟนจ่าย(หลัก),กิจกรรมย่อย,ฉันจ่าย(ย่อย),แฟนจ่าย(ย่อย)\n";
+  const generateExportData = (tripsData) => {
+    const rows = [];
+    rows.push(["ชื่อทริป","วันไป","วันกลับ","ใช้รวม","ฉันจ่ายรวม","แฟนจ่ายรวม","สถานที่/กิจกรรม","การเดินทาง","รายละเอียดการเดินทาง","ฉันจ่าย(หลัก)","แฟนจ่าย(หลัก)","กิจกรรมย่อย","ฉันจ่าย(ย่อย)","แฟนจ่าย(ย่อย)"]);
 
-    trips.forEach(trip => {
+    tripsData.forEach(trip => {
       const spent = calculateTotalSpent(trip);
       if (!trip.itinerary || trip.itinerary.length === 0) {
-        csvContent += `${trip.name},${trip.startDate},${trip.endDate},${spent.total},${spent.me},${spent.partner},,,,,, \n`;
+        rows.push([trip.name, trip.startDate, trip.endDate, spent.total, spent.me, spent.partner, "", "", "", "", "", "", "", ""]);
       } else {
         trip.itinerary.forEach((item, index) => {
           let transportInfo = '';
@@ -383,29 +334,23 @@ export default function App() {
           }
           if (item.transportMode === 'grab') transportInfo = `จุดรับ: ${item.grabPickup || '-'}`;
 
-          const prefix = index === 0 ? `${trip.name},${trip.startDate},${trip.endDate},${spent.total},${spent.me},${spent.partner}` : `,,,,,`;
+          const prefix = index === 0 ? [trip.name, trip.startDate, trip.endDate, spent.total, spent.me, spent.partner] : ["", "", "", "", "", ""];
           
           if (!item.subItems || item.subItems.length === 0) {
-            csvContent += `${prefix},${item.name},${item.transportMode === 'public' ? 'รถสาธารณะ' : 'Grab/Taxi'},${transportInfo},${item.myCost || 0},${item.partnerCost || 0},,\n`;
+            rows.push([...prefix, item.name, item.transportMode === 'public' ? 'รถสาธารณะ' : 'Grab/Taxi', transportInfo, item.myCost || 0, item.partnerCost || 0, "", "", ""]);
           } else {
             item.subItems.forEach((sub, sIdx) => {
                if (sIdx === 0) {
-                 csvContent += `${prefix},${item.name},${item.transportMode === 'public' ? 'รถสาธารณะ' : 'Grab/Taxi'},${transportInfo},${item.myCost || 0},${item.partnerCost || 0},${sub.name},${sub.myCost || 0},${sub.partnerCost || 0}\n`;
+                 rows.push([...prefix, item.name, item.transportMode === 'public' ? 'รถสาธารณะ' : 'Grab/Taxi', transportInfo, item.myCost || 0, item.partnerCost || 0, sub.name, sub.myCost || 0, sub.partnerCost || 0]);
                } else {
-                 csvContent += `,,,,,,,${item.name} (ต่อ),,,,${sub.name},${sub.myCost || 0},${sub.partnerCost || 0}\n`;
+                 rows.push(["", "", "", "", "", "", `${item.name} (ต่อ)`, "", "", "", "", sub.name, sub.myCost || 0, sub.partnerCost || 0]);
                }
             });
           }
         });
       }
     });
-
-    const link = document.createElement("a");
-    link.setAttribute("href", encodeURI(csvContent));
-    link.setAttribute("download", "trip_planner_export.csv");
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    return rows;
   };
 
   const getTransportIcon = (type) => {
@@ -571,19 +516,17 @@ export default function App() {
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-white p-6 rounded-2xl shadow-sm border border-rose-100 gap-4">
         <div>
           <h2 className="text-2xl font-bold text-gray-800 flex items-center gap-2">แพลนเที่ยวของเรา <Heart className="text-rose-500" fill="currentColor" size={24} /></h2>
-          <p className="text-gray-500 mt-1">วางแผนความทรงจำดีๆ ไปด้วยกันแบบ Real-time</p>
+          <p className="text-gray-500 mt-1">วางแผนความทรงจำดีๆ ไปด้วยกัน</p>
         </div>
         <div className="flex gap-2 w-full sm:w-auto">
-          {/* Share Button (New) */}
+          {syncStatus === 'syncing' && <div className="p-2 text-teal-500 flex items-center gap-1 text-sm font-medium animate-pulse"><RefreshCw size={18} className="animate-spin"/> ซิงค์...</div>}
+          {syncStatus === 'success' && <div className="p-2 text-green-500 flex items-center gap-1 text-sm font-medium"><CheckCircle2 size={18}/> อัปเดตแล้ว</div>}
+          
           <button 
-            onClick={() => setIsShareModalOpen(true)} 
-            className={`flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-2 rounded-xl transition-colors font-medium border ${coupleCode && user && coupleCode !== user.uid ? 'bg-indigo-50 text-indigo-600 border-indigo-200 hover:bg-indigo-100' : 'bg-rose-50 text-rose-600 border-rose-200 hover:bg-rose-100'}`}
+            onClick={() => setIsSettingsOpen(true)} 
+            className={`flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-2 rounded-xl transition-colors font-medium border ${sheetUrl ? 'bg-indigo-50 text-indigo-600 border-indigo-200 hover:bg-indigo-100' : 'bg-rose-50 text-rose-600 border-rose-200 hover:bg-rose-100'}`}
           >
-            <LinkIcon size={18} /> {coupleCode && user && coupleCode !== user.uid ? 'เชื่อมต่อแล้ว' : 'แชร์ให้แฟน'}
-          </button>
-
-          <button onClick={exportToCSV} className="p-2 text-gray-500 hover:text-teal-600 hover:bg-teal-50 rounded-xl border border-gray-200 transition-colors" title="ส่งออกเป็น Excel/CSV">
-            <Download size={20} />
+            <LinkIcon size={18} /> {sheetUrl ? 'แชร์ให้แฟน' : 'ตั้งค่าเชื่อมต่อ'}
           </button>
         </div>
       </div>
@@ -826,58 +769,37 @@ export default function App() {
       </header>
 
       <main className="max-w-3xl mx-auto px-4 sm:px-6 py-8">
-        {!user ? (
-          <div className="flex flex-col items-center justify-center py-20 animate-pulse">
-            <PlaneTakeoff size={48} className="text-rose-300 mb-4" />
-            <p className="text-gray-500 font-medium">กำลังเตรียมพร้อมขึ้นบิน...</p>
-          </div>
-        ) : (
-          currentView === 'dashboard' ? renderDashboard() : renderTripDetails()
-        )}
+        {currentView === 'dashboard' ? renderDashboard() : renderTripDetails()}
       </main>
 
-      {/* --- Share Modal (NEW) --- */}
-      {isShareModalOpen && (
+      {/* --- Settings Modal --- */}
+      {isSettingsOpen && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200">
-            <div className="bg-rose-50 px-6 py-4 border-b border-rose-100 flex justify-between items-center">
-              <h3 className="text-lg font-bold text-rose-800 flex items-center gap-2"><LinkIcon size={18}/> เชื่อมต่อกับแฟน</h3>
-              <button onClick={() => setIsShareModalOpen(false)} className="text-rose-400 hover:text-rose-600"><X size={20}/></button>
+            <div className="bg-teal-50 px-6 py-4 border-b border-teal-100 flex justify-between items-center">
+              <h3 className="text-lg font-bold text-teal-800 flex items-center gap-2"><Settings size={18}/> ตั้งค่าแชร์ให้แฟน</h3>
+              <button onClick={() => setIsSettingsOpen(false)} className="text-teal-400 hover:text-teal-600"><X size={20}/></button>
             </div>
-            <div className="p-6 space-y-6">
-              
-              {/* Step 1: My Code */}
-              <div className="space-y-2">
-                <label className="block text-sm font-bold text-gray-700">1. รหัสของคุณ (ส่งให้แฟนกรอก)</label>
-                <div className="flex items-center gap-2">
-                  <input readOnly value={user?.uid || ''} className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl text-sm font-mono text-gray-500 outline-none" />
-                  <button onClick={() => copyToClipboard(user?.uid || '')} className="p-3 bg-rose-100 text-rose-600 rounded-xl hover:bg-rose-200 transition-colors" title="คัดลอกรหัส">
-                    <Copy size={20} />
-                  </button>
-                </div>
+            <div className="p-6 space-y-4">
+              <div className="bg-rose-50 p-3 rounded-xl border border-rose-100 mb-4 text-sm text-rose-800">
+                <strong className="block mb-1">อยากลิงก์ข้อมูลกันไหม?</strong>
+                แค่คัดลอก Web App URL (ของ Google Sheet) ด้านล่างนี้ ไปส่งให้แฟนกรอกไว้ที่เครื่องแฟน ข้อมูลก็จะซิงค์ตรงกันเป๊ะเลยครับ!
               </div>
-
-              <div className="flex items-center gap-4">
-                <div className="h-px bg-gray-200 flex-1"></div>
-                <span className="text-xs text-gray-400 font-bold">หรือ</span>
-                <div className="h-px bg-gray-200 flex-1"></div>
-              </div>
-
-              {/* Step 2: Partner Code */}
-              <form onSubmit={handleLinkPartner} className="space-y-2">
-                <label className="block text-sm font-bold text-gray-700">2. นำรหัสของแฟนมากรอกที่นี่</label>
+              <div>
+                <label className="block text-sm font-bold text-gray-700 mb-2">Web App URL (จาก Google Sheet)</label>
                 <input 
                   type="text" 
-                  value={partnerCodeInput} 
-                  onChange={e => setPartnerCodeInput(e.target.value)} 
-                  className="w-full p-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-rose-500 outline-none text-sm font-mono" 
-                  placeholder="วางรหัสของแฟน..." 
+                  value={sheetUrl} 
+                  onChange={e => setSheetUrl(e.target.value)} 
+                  className="w-full p-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-teal-500 outline-none text-sm font-mono" 
+                  placeholder="https://script.google.com/macros/s/.../exec" 
                 />
-                <button type="submit" disabled={!partnerCodeInput.trim()} className="w-full mt-3 py-3 bg-rose-500 text-white font-bold rounded-xl hover:bg-rose-600 disabled:bg-rose-300 disabled:cursor-not-allowed transition-colors shadow-md shadow-rose-200">
-                  เชื่อมต่อข้อมูล
+              </div>
+              <div className="pt-2">
+                <button onClick={() => setIsSettingsOpen(false)} className="w-full py-3 bg-teal-500 text-white font-bold rounded-xl hover:bg-teal-600 transition-colors shadow-md shadow-teal-200">
+                  บันทึกการตั้งค่า
                 </button>
-              </form>
-
+              </div>
             </div>
           </div>
         </div>
@@ -889,7 +811,7 @@ export default function App() {
           <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl overflow-hidden my-8">
             <div className="bg-gray-50 px-6 py-4 border-b border-gray-100 flex justify-between items-center sticky top-0 z-10">
               <h3 className="text-lg font-bold text-gray-800">{tripForm.id ? 'แก้ไขทริป' : 'สร้างทริปใหม่'}</h3>
-              <button onClick={() => setIsTripModalOpen(false)} className="text-gray-400 hover:text-gray-600">&times;</button>
+              <button onClick={() => setIsTripModalOpen(false)} className="text-gray-400 hover:text-gray-600"><X size={20}/></button>
             </div>
             <form onSubmit={handleSaveTrip} className="p-6 space-y-5 max-h-[70vh] overflow-y-auto">
               <div>
@@ -953,7 +875,7 @@ export default function App() {
           <div className="bg-white rounded-2xl w-full max-w-sm shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200">
             <div className="bg-gray-50 px-6 py-4 border-b border-gray-100 flex justify-between items-center">
               <h3 className="text-lg font-bold text-gray-800">{itemForm.id ? 'แก้ไขสถานที่' : 'เพิ่มสถานที่'}</h3>
-              <button onClick={() => setIsItemModalOpen(false)} className="text-gray-400 hover:text-gray-600">&times;</button>
+              <button onClick={() => setIsItemModalOpen(false)} className="text-gray-400 hover:text-gray-600"><X size={20}/></button>
             </div>
             <form onSubmit={handleSaveItem} className="p-6 space-y-4 max-h-[75vh] overflow-y-auto">
               <div>
@@ -1070,7 +992,7 @@ export default function App() {
           <div className="bg-white rounded-2xl w-full max-w-sm shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200">
             <div className="bg-rose-50 px-6 py-4 border-b border-rose-100 flex justify-between items-center">
               <h3 className="text-lg font-bold text-rose-800 flex items-center gap-2"><Utensils size={18}/> เพิ่มกิจกรรม / ร้านอาหาร</h3>
-              <button onClick={() => setIsSubItemModalOpen(false)} className="text-rose-400 hover:text-rose-600">&times;</button>
+              <button onClick={() => setIsSubItemModalOpen(false)} className="text-rose-400 hover:text-rose-600"><X size={20}/></button>
             </div>
             <form onSubmit={handleSaveSubItem} className="p-6 space-y-4">
               <div>
